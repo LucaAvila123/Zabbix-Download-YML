@@ -1,0 +1,119 @@
+---
+- name: Zabbix download entire process
+  hosts: ec2host # host defined in a proper yml
+  become: yes
+  vars_files: 
+    - all.yml
+  tasks:
+    - name: Create project directory {{ project_dir }}
+      file: state=directory path={{ project_dir }}
+    - name: Download source
+      get_url: url={{ url }} dest={{ project_dir }}/{{ file }}
+    - name: Installing a package
+      apt:
+        deb: /home/{{ machine_user }}/{{ project_dir }}/{{ file }}
+      become: true
+    - name: Update
+      become: true
+      apt:
+        upgrade: yes
+        update_cache: yes
+    - name: Installing Zabbix elements
+      apt:
+        name:
+          - zabbix-server-mysql 
+          - zabbix-frontend-php 
+          - zabbix-apache-conf 
+          - zabbix-sql-scripts 
+          - zabbix-agent
+      become: true 
+
+    - name: Installing Mysql  and dependencies
+      package:
+       name: "{{item}}"
+       state: present
+       update_cache: yes
+      loop:
+        - mysql-server
+        - mysql-client 
+        - python3-mysqldb
+        - libmysqlclient-dev
+      become: yes    
+    
+    - name: Start and enable mysql service
+      service:
+        name: mysql
+        state: started
+        enabled: yes    
+    
+    - name: Enable remote login to mysql
+      lineinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        regexp: '^bind-address'
+        line: 'bind-address = 0.0.0.0'
+        backup: yes
+
+    - name: Restart mysql
+      service:
+        name: mysql
+        state: restarted
+
+    - name: Creating zabbix database
+      mysql_db:
+        name: "{{ db_name }}"
+        state: present    
+        encoding: utf8mb4
+        login_unix_socket: /run/mysqld/mysqld.sock
+      become: yes
+      
+    - name: Creating zabbix mysql user
+      mysql_user:
+        name: "{{ db_user }}" 
+        password: "{{ db_pass }}"
+        priv: '*.*:ALL'
+        host: 'localhost'
+        state: present    
+    
+    - name: Setting global log_bin
+      community.mysql.mysql_query:
+        login_host: localhost
+        login_user: root
+        login_password: "{{ db_pass }}"
+        query: set global log_bin_trust_function_creators = 1;
+      become: yes
+
+    - name: Unzip and importing Zabbix database
+      shell: zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql --default-character-set=utf8mb4 -uzabbix -p{{ mysql_password }} zabbix
+      vars:
+        mysql_password: "{{ db_pass }}"
+      no_log: true
+      become: yes
+      args:
+        executable: /bin/bash
+
+    - name: Setting global log_bin
+      community.mysql.mysql_query:
+        login_db: "{{ db_name }}"
+        login_host: localhost
+        login_user: "{{ db_user }}"
+        login_password: "{{ db_pass }}"
+        query: set global log_bin_trust_function_creators = 0;
+      become: yes
+
+    - name: zabbix_server config file defined within machine
+      ansible.builtin.copy:
+        src: ./zabbix_server.conf
+        dest: /etc/zabbix/zabbix_server.conf
+        backup: yes
+        force: yes
+        
+    - name: Restart Zabbix-server
+      ansible.builtin.service:
+        name: "{{item}}"
+        state: restarted
+        enabled: yes
+      loop:
+        - zabbix-server
+        - zabbix-agent
+        - apache2
+      become: yes
